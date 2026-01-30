@@ -1,0 +1,6 @@
+{
+  "resources": [
+    { "id": "i-123", "region": "us-east-1" },
+    { "id": "i-456", "region": "ap-south-1" }
+  ]
+}

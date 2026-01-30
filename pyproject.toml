@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "opactx"
+version = "0.1.0"
+description = "Contract-first policy context builder for Open Policy Agent"
+authors = ["Hloma Z Monama <160079404+HZMonama@users.noreply.github.com>"]
+readme = "README.md"
+packages = [{ include = "opactx", from = "src" }]
+include = ["src/opactx/templates/**"]
+
+[tool.poetry.scripts]
+opactx = "opactx.cli.app:app"
+
+
+[tool.poetry.dependencies]
+python = ">=3.13"
+typer = "^0.21.1"
+rich = "^14.3.1"
+rich-click = "^1.9.6"
+pydantic = "^2.12.5"
+ruamel-yaml = "^0.19.1"
+jsonschema = "^4.26.0"
+httpx = "^0.28.1"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.2,<10.0.0)",
+    "pytest-cov (>=7.0.0,<8.0.0)",
+    "hypothesis (>=6.151.2,<7.0.0)",
+    "ruff (>=0.14.14,<0.15.0)",
+    "pre-commit (>=4.5.1,<5.0.0)"
+]
+
+[tool.poetry.plugins."opactx.sources"]
+file = "opactx.sources.file:FileSource"
+http = "opactx.sources.http:HttpSource"
+exec = "opactx.sources.exec:ExecSource"
+
+[tool.poetry.plugins."opactx.transforms"]
+builtin = "opactx.transforms.builtin:CanonicalizeTransform"

@@ -1,0 +1,20 @@
+version: v1
+
+schema: schema/context.schema.json
+context_dir: context
+
+sources:
+  - name: inventory
+    type: file
+    with:
+      path: fixtures/inventory.json
+
+transforms:
+  - name: canonicalize
+    type: builtin
+    with: {}
+
+output:
+  dir: dist/bundle
+  include_policy: false
+  tarball: false

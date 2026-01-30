@@ -1,0 +1,8 @@
+# Organizational standards used by policies.
+# Keep this file declarative and reviewable.
+allowed_regions:
+  - us-east-1
+  - eu-west-1
+approved_registries:
+  - ghcr.io/my-org
+  - registry.example.com

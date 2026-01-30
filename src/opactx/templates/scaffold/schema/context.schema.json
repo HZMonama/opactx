@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["standards", "exceptions", "sources"],
+  "properties": {
+    "standards": { "type": "object" },
+    "exceptions": { "type": "object" },
+    "sources": { "type": "object" }
+  },
+  "additionalProperties": false
+}

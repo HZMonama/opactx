@@ -1,0 +1,12 @@
+version: v1
+
+schema: schema/context.schema.json
+context_dir: context
+
+sources: []
+transforms: []
+
+output:
+  dir: dist/bundle
+  include_policy: false
+  tarball: false
