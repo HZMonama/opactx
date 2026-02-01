@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -12,25 +13,34 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from opactx import __version__
 from opactx.core import events as ev
+from opactx.core.stages import (
+    BUILD_STAGES,
+    INIT_STAGES,
+    INSPECT_STAGES,
+    VALIDATE_STAGES,
+)
 
+RULE_WIDTH = 64
+RULE_LINE = "-" * RULE_WIDTH
+STATUS_GLYPHS = {
+    "pending": "⏸",
+    "running": "⠋",
+    "success": "✅",
+    "failed": "❌",
+    "skipped": "⏭",
+    "partial": "⚠️",
+    "warning": "⚠️",
+}
 
-STAGES_BUILD: list[tuple[str, str]] = [
-    ("load_config", "Load config"),
-    ("load_intent", "Load intent context"),
-    ("fetch_sources", "Fetch sources"),
-    ("normalize", "Normalize"),
-    ("validate_schema", "Validate schema"),
-    ("write_bundle", "Write bundle"),
-]
-
-STAGES_VALIDATE: list[tuple[str, str]] = [
-    ("load_config", "Config"),
-    ("load_schema", "Schema"),
-    ("load_intent", "Intent"),
-    ("resolve_plugins", "Plugins"),
-    ("schema_check", "Schema check"),
-]
+VALIDATE_CHECK_LABELS = {
+    "load_config": "Config",
+    "load_schema": "Schema",
+    "load_intent": "Intent",
+    "resolve_plugins": "Plugins",
+    "schema_check": "Schema check",
+}
 
 
 def run_events(events: Iterable[ev.OpactxEvent], renderer: "Renderer") -> int:
@@ -65,8 +75,9 @@ class BuildRichRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
         self.is_tty = console.is_terminal
-        self.stage_status = {name: "pending" for name, _ in STAGES_BUILD}
+        self.stage_status = {name: "pending" for name, _ in BUILD_STAGES}
         self.stage_elapsed: dict[str, float] = {}
+        self.stage_progress: dict[str, tuple[int, int]] = {}
         self.sources: dict[str, SourceState] = {}
         self._live: Live | None = None
         self._schema_path: Path | None = None
@@ -76,6 +87,8 @@ class BuildRichRenderer(Renderer):
         self._source_failure: ev.SourceFetchFailed | None = None
         self._schema_failure: ev.SchemaValidationFailed | None = None
         self._stage_failure: ev.StageFailed | None = None
+        self._show_sources = False
+        self._bundle_failure: ev.BundleWriteFailed | None = None
 
     def handle(self, event: ev.OpactxEvent) -> None:
         if isinstance(event, ev.CommandStarted):
@@ -87,6 +100,8 @@ class BuildRichRenderer(Renderer):
             return
         if isinstance(event, ev.StageStarted):
             self.stage_status[event.stage_id] = "running"
+            if event.stage_id == "fetch_sources":
+                self._show_sources = True
             self._refresh()
             return
         if isinstance(event, ev.StageCompleted):
@@ -100,19 +115,43 @@ class BuildRichRenderer(Renderer):
             self._stage_failure = event
             self._refresh()
             return
+        if isinstance(event, ev.StageProgress):
+            self.stage_progress[event.stage_id] = (event.current, event.total)
+            self._refresh()
+            return
         if isinstance(event, ev.SchemaLoaded):
             self._schema_path = Path(event.path) if event.path else None
+            return
+        if isinstance(event, ev.SourcesPlanned):
+            for info in event.sources:
+                name = info.get("name", "")
+                source_type = info.get("type", "")
+                note = info.get("notes")
+                if not name:
+                    continue
+                self.sources[name] = SourceState(
+                    name=name,
+                    source_type=source_type,
+                    status="waiting",
+                    note=note,
+                )
+            self._refresh()
             return
         if isinstance(event, ev.SchemaValidationFailed):
             self._schema_failure = event
             return
         if isinstance(event, ev.SourceFetchStarted):
-            self.sources[event.name] = SourceState(
-                name=event.name,
-                source_type=event.type_key,
-                status="fetching",
-                note=event.notes,
-            )
+            state = self.sources.get(event.name)
+            if state:
+                state.status = "fetching"
+                state.note = event.notes or state.note
+            else:
+                self.sources[event.name] = SourceState(
+                    name=event.name,
+                    source_type=event.type_key,
+                    status="fetching",
+                    note=event.notes,
+                )
             self._refresh()
             return
         if isinstance(event, ev.SourceFetchCompleted):
@@ -133,6 +172,9 @@ class BuildRichRenderer(Renderer):
             return
         if isinstance(event, ev.BundleWriteStarted):
             self._output_dir = Path(event.out_dir) if event.out_dir else None
+            return
+        if isinstance(event, ev.BundleWriteFailed):
+            self._bundle_failure = event
             return
         if isinstance(event, ev.BundleWritten):
             self._bundle_info = {
@@ -158,16 +200,27 @@ class BuildRichRenderer(Renderer):
                 self.console.print(_source_failure_panel(self._source_failure))
             elif self._schema_failure:
                 self.console.print(_schema_failure_panel(self._schema_failure))
+            elif self._bundle_failure:
+                body = "\n".join(
+                    [
+                        f"out_dir: {self._bundle_failure.out_dir}",
+                        f"error: {_redact(self._bundle_failure.message)}",
+                    ]
+                )
+                self.console.print(Panel(body, title="Bundle write failed", box=box.ROUNDED, title_align="left"))
             elif self._stage_failure:
                 self.console.print(_stage_failure_panel(self._stage_failure))
             return
         if self._dry_run:
             self.console.print("Dry run complete (no files written)")
             if self._output_dir:
-                self.console.print(f"Would write: {self._output_dir / 'data.json'}")
-                self.console.print(f"Would write: {self._output_dir / '.manifest'}")
+                self.console.print(f"Would write: {self._output_dir}/{{data.json,.manifest}}")
             return
         if self._bundle_info:
+            self.console.print("[green]✅ Build complete[/green]")
+            next_lines = [f"- opactx inspect {self._bundle_info['out_dir']}"]
+            if Path("policy").exists():
+                next_lines.append(f"- conftest test --bundle {self._bundle_info['out_dir']} ./policy")
             body = "\n".join(
                 [
                     f"Path:     {self._bundle_info['out_dir']}",
@@ -177,16 +230,13 @@ class BuildRichRenderer(Renderer):
                     f"Sources:  {len(self.sources)}",
                     "",
                     "Next:",
-                    f"- opactx inspect {self._bundle_info['out_dir']}",
+                    *next_lines,
                 ]
             )
-            self.console.print(Panel(body, title="Build complete", box=box.ROUNDED, title_align="left"))
+            self.console.print(Panel(body, title="Bundle output", box=box.ROUNDED, title_align="left"))
 
     def _print_header(self, event: ev.CommandStarted) -> None:
-        project = event.project_dir or Path(".")
-        config = event.config_path or Path("opactx.yaml")
-        self.console.print(f"opactx | project: {project} | config: {config}")
-        self.console.print("-" * 64)
+        _print_header(self.console, event)
         self.console.print("Building policy context bundle (OPA-compatible)")
 
     def _refresh(self) -> None:
@@ -194,14 +244,25 @@ class BuildRichRenderer(Renderer):
             self._live.update(self._render())
 
     def _render(self) -> Group:
-        lines = []
-        for index, (stage_id, label) in enumerate(STAGES_BUILD, start=1):
+        total = len(BUILD_STAGES)
+        stage_table = Table(show_header=True, box=box.MINIMAL, show_lines=False)
+        stage_table.add_column("#", justify="right", style="dim")
+        stage_table.add_column("Stage")
+        stage_table.add_column("Status")
+        stage_table.add_column("Time", justify="right")
+        for index, (stage_id, label) in enumerate(BUILD_STAGES, start=1):
             status = self.stage_status.get(stage_id, "pending")
             elapsed = self.stage_elapsed.get(stage_id)
-            lines.append(_format_stage_line(index, label, status, elapsed))
-        renderables: list = [Text("\n".join(lines))]
-        if self.sources:
-            renderables.append(_sources_table(self.sources.values()))
+            progress = self.stage_progress.get(stage_id)
+            status_text = _format_status_text(status, progress)
+            if stage_id == "write_bundle" and status == "skipped" and self._dry_run:
+                status_text = f"{status_text} (--dry-run)"
+            duration = _format_duration(elapsed) if elapsed is not None else ""
+            stage_table.add_row(f"{index}/{total}", label, status_text, duration)
+        renderables: list = [Panel(stage_table, title="Stages", box=box.ROUNDED, title_align="left")]
+        if self._show_sources and self.sources:
+            sources_table = _sources_table(self.sources.values(), title=None)
+            renderables.append(Panel(sources_table, title="Sources", box=box.ROUNDED, title_align="left"))
         return Group(*renderables)
 
 
@@ -215,41 +276,119 @@ class BuildPlainRenderer(Renderer):
         self._source_failure: ev.SourceFetchFailed | None = None
         self._schema_failure: ev.SchemaValidationFailed | None = None
         self._stage_failure: ev.StageFailed | None = None
+        self._sources_count = 0
+        self._source_notes: dict[str, str] = {}
+        self._source_types: dict[str, str] = {}
+        self._sources_total = 0
+        self._bundle_failure: ev.BundleWriteFailed | None = None
 
     def handle(self, event: ev.OpactxEvent) -> None:
         if isinstance(event, ev.CommandStarted):
             self._dry_run = bool(event.options and event.options.get("dry_run"))
-            self.console.print(f"opactx | project: {event.project_dir} | config: {event.config_path}")
-            self.console.print("-" * 64)
+            _print_header(self.console, event)
             self.console.print("Building policy context bundle (OPA-compatible)")
             return
+        if isinstance(event, ev.StageStarted):
+            label = _stage_label(event.stage_id, BUILD_STAGES)
+            index = _stage_index(event.stage_id, BUILD_STAGES)
+            note = None
+            if event.stage_id == "fetch_sources" and self._sources_total:
+                note = f"({self._sources_total} sources)"
+            line = _format_stage_start_line(index, label, len(BUILD_STAGES), note)
+            self.console.print(line)
+            return
         if isinstance(event, ev.StageCompleted):
-            label = _stage_label(event.stage_id, STAGES_BUILD)
-            status = "OK" if event.status == "success" else event.status.upper()
-            duration = _format_duration(event.duration_ms)
-            self.console.print(f"{label}: {status} {duration}")
+            label = _stage_label(event.stage_id, BUILD_STAGES)
+            index = _stage_index(event.stage_id, BUILD_STAGES)
+            note = None
+            if event.stage_id == "write_bundle" and event.status == "skipped" and self._dry_run:
+                note = "(--dry-run)"
+            line = _format_stage_line(
+                index,
+                label,
+                event.status,
+                event.duration_ms,
+                None,
+                note,
+                len(BUILD_STAGES),
+                True,
+            )
+            self.console.print(line)
             return
         if isinstance(event, ev.StageFailed):
-            label = _stage_label(event.stage_id, STAGES_BUILD)
-            duration = _format_duration(event.duration_ms)
-            self.console.print(f"{label}: FAIL {duration}")
+            label = _stage_label(event.stage_id, BUILD_STAGES)
+            index = _stage_index(event.stage_id, BUILD_STAGES)
+            line = _format_stage_line(
+                index,
+                label,
+                "failed",
+                event.duration_ms,
+                None,
+                None,
+                len(BUILD_STAGES),
+                True,
+            )
+            details = []
+            if event.message:
+                details.append(f"FAIL: {_redact(event.message)}")
+            if event.hint:
+                details.append(f"HINT: {_redact(event.hint)}")
+            if details:
+                line = f"{line}\n" + "\n".join(details)
+            self.console.print(line)
             self._stage_failure = event
+            return
+        if isinstance(event, ev.SourcesPlanned):
+            self._sources_total = len(event.sources)
+            for info in event.sources:
+                name = info.get("name", "")
+                if name:
+                    self._source_types[name] = info.get("type", "")
+                notes = info.get("notes")
+                if name and notes:
+                    self._source_notes[name] = notes
             return
         if isinstance(event, ev.SchemaLoaded):
             self._schema_path = Path(event.path) if event.path else None
+            if event.path:
+                self.console.print(f"Schema: {event.path}")
             return
         if isinstance(event, ev.SchemaValidationFailed):
             self._schema_failure = event
             return
+        if isinstance(event, ev.SourceFetchStarted):
+            source_type = self._source_types.get(event.name, event.type_key or "")
+            self.console.print(f"SOURCE START {event.name} ({source_type})")
+            if event.notes:
+                self._source_notes[event.name] = event.notes
+            return
         if isinstance(event, ev.SourceFetchCompleted):
-            self.console.print(_format_source_line(event.name, "done", event.duration_ms, None))
+            self._sources_count += 1
+            size = ""
+            if event.size_bytes is not None:
+                size = f" {_format_bytes(event.size_bytes)}"
+            note = self._source_notes.get(event.name)
+            note_suffix = f" ({_redact(note)})" if note else ""
+            duration = _format_duration(event.duration_ms)
+            self.console.print(f"SOURCE OK {event.name} {duration}{size}{note_suffix}")
             return
         if isinstance(event, ev.SourceFetchFailed):
+            self._sources_count += 1
             self._source_failure = event
-            self.console.print(_format_source_line(event.name, "failed", event.duration_ms, None))
+            message = _redact(event.message)
+            line = f"SOURCE FAIL {event.name}: {message}"
+            if event.hint:
+                line = f"{line}\nHINT: {_redact(event.hint)}"
+            self.console.print(line)
             return
         if isinstance(event, ev.BundleWriteStarted):
             self._output_dir = Path(event.out_dir) if event.out_dir else None
+            if self._output_dir:
+                self.console.print(f"Writing bundle to {self._output_dir}")
+            return
+        if isinstance(event, ev.BundleWriteFailed):
+            self._bundle_failure = event
+            self.console.print(f"BUNDLE FAIL: {_redact(event.message)}")
             return
         if isinstance(event, ev.BundleWritten):
             self._bundle_info = {
@@ -266,105 +405,204 @@ class BuildPlainRenderer(Renderer):
             if self._source_failure:
                 self.console.print("Source fetch failed")
                 self.console.print(f"source: {self._source_failure.name} (type={self._source_failure.type_key})")
-                self.console.print(f"error: {self._source_failure.message}")
+                self.console.print(f"error: {_redact(self._source_failure.message)}")
                 return
             if self._schema_failure:
                 self.console.print("Schema validation failed")
                 for item in self._schema_failure.errors[:20]:
-                    self.console.print(f"{item['path']}: {item['message']}")
+                    self.console.print(f"{item['path']}: {_redact(item['message'])}")
                 return
             if self._stage_failure:
-                self.console.print(f"Error: {self._stage_failure.message}")
+                self.console.print(f"Error: {_redact(self._stage_failure.message)}")
                 return
             return
         if self._dry_run:
             self.console.print("Dry run complete (no files written)")
             if self._output_dir:
-                self.console.print(f"Would write: {self._output_dir / 'data.json'}")
-                self.console.print(f"Would write: {self._output_dir / '.manifest'}")
+                self.console.print(f"Would write: {self._output_dir}/{{data.json,.manifest}}")
             return
         if self._bundle_info:
-            self.console.print("Build complete")
-            self.console.print(f"Path: {self._bundle_info['out_dir']}")
-            self.console.print(f"Files: {self._bundle_info['files']}")
-            self.console.print(f"Revision: {self._bundle_info['revision']}")
-            self.console.print(f"Schema: {self._schema_path}")
-            self.console.print(f"Sources: {self._bundle_info and ''}")
+            self.console.print(
+                f"BUNDLE OK {self._bundle_info['out_dir']} revision={self._bundle_info['revision']}"
+            )
 
 
 class InitRichRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
-        self._actions: list[tuple[str, Path]] = []
-        self._options: dict[str, bool] = {}
+        self._project: Path | None = None
+        self._warnings: list[str] = []
+        self._failed: ev.StageFailed | None = None
+        self._planned_count = 0
+        self._plan_started = False
+        self._dry_run = False
+        self._planned: list[tuple[str, Path, str]] = []
+        self._written: list[tuple[Path, int]] = []
 
     def handle(self, event: ev.OpactxEvent) -> None:
         if isinstance(event, ev.CommandStarted):
-            self._options = event.options or {}
+            self._project = Path(event.project_dir) if event.project_dir else None
+            self._dry_run = bool(event.options and event.options.get("dry_run"))
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.StageStarted) and event.stage_id == "plan_scaffold":
+            project = self._project or Path(".")
+            self.console.print(f"Initializing opactx project at {project}\n{RULE_LINE}")
+            self._plan_started = True
             return
         if isinstance(event, ev.FilePlanned):
             if event.path:
-                self._actions.append((event.op, Path(event.path)))
+                self._planned_count += 1
+                destination = Path(event.path)
+                note = "new" if event.op == "CREATE" else "exists" if event.op == "SKIP" else ""
+                self._planned.append((event.op, destination, note))
             return
-        if isinstance(event, ev.StageCompleted) and event.stage_id == "plan":
-            self._print_actions()
+        if isinstance(event, ev.StageStarted) and event.stage_id == "apply_scaffold":
+            if not self._dry_run:
+                self.console.print("Writing files...")
             return
-        if isinstance(event, ev.CommandCompleted) and event.ok:
-            self._print_summary()
-
-    def _print_actions(self) -> None:
-        title = _init_label(
-            minimal=self._options.get("minimal", False),
-            with_examples=self._options.get("with_examples", False),
-            no_policy=self._options.get("no_policy", False),
-        )
-        self.console.print("")
-        table = Table(title=title, box=box.ROUNDED, title_align="left")
-        table.add_column("Action", style="bold")
-        table.add_column("Path", overflow="fold")
-        table.add_column("Note", style="dim")
-        for action, destination in self._actions:
-            style = {
-                "CREATE": "green",
-                "OVERWRITE": "yellow",
-                "SKIP": "dim",
-            }.get(action, "")
-            note = "new" if action == "CREATE" else "exists" if action == "SKIP" else ""
-            table.add_row(action, str(destination), note, style=style)
-        self.console.print(table)
+        if isinstance(event, ev.FileWritten):
+            if event.path:
+                self._written.append((Path(event.path), event.bytes))
+            return
+        if isinstance(event, ev.FileWriteFailed):
+            message = _redact(event.message)
+            body = "\n".join(
+                [
+                    f"path: {event.path}",
+                    f"error: {message}",
+                ]
+            )
+            self.console.print(Panel(body, title="Write failed", box=box.ROUNDED, title_align="left"))
+            return
+        if isinstance(event, ev.Warning):
+            self._warnings.append(_redact(event.message))
+            return
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            return
+        if isinstance(event, ev.StageCompleted) and event.stage_id == "plan_scaffold":
+            if not self._plan_started:
+                project = self._project or Path(".")
+                self.console.print(f"Initializing opactx project at {project}\n{RULE_LINE}")
+            plan_table = Table(show_header=True, box=box.MINIMAL)
+            plan_table.add_column("Action", style="bold")
+            plan_table.add_column("Path")
+            plan_table.add_column("Note", style="dim")
+            for action, path, note in self._planned:
+                plan_table.add_row(action, str(path), note)
+            self.console.print(Panel(plan_table, title="Plan", box=box.ROUNDED, title_align="left"))
+            self.console.print(f"Planned: {self._planned_count} ops")
+            return
+        if isinstance(event, ev.CommandCompleted):
+            if event.ok:
+                if self._dry_run:
+                    self.console.print(Panel("Dry run (no files written).", title="Dry run", box=box.ROUNDED))
+                else:
+                    if self._written:
+                        write_table = Table(show_header=True, box=box.MINIMAL)
+                        write_table.add_column("File", style="bold")
+                        write_table.add_column("Bytes", justify="right")
+                        for path, count in self._written:
+                            write_table.add_row(str(path), str(count))
+                        self.console.print(
+                            Panel(write_table, title="Written files", box=box.ROUNDED, title_align="left")
+                        )
+                    self._print_summary()
+            else:
+                self._print_error()
 
     def _print_summary(self) -> None:
         self.console.print("")
-        self.console.print("[green]✓ Successfully initialized:[/green] .")
-        self.console.print("")
-        steps = "\n".join(
+        body = "\n".join(
             [
-                "- opactx build (outputs to dist/bundle/)",
-                "- Edit opactx.yaml sources and context/standards.yaml",
+                "Next:",
+                "- Edit context/standards.yaml",
+                "- Run: opactx validate",
             ]
         )
-        self.console.print(Panel(steps, title="Next steps", box=box.ROUNDED, expand=False, title_align="left"))
+        self.console.print(Panel(body, title="✅ Project initialized", box=box.ROUNDED, title_align="left"))
+        for warning in self._warnings:
+            self.console.print(f"[yellow]Warning:[/yellow] {warning}")
+
+    def _print_error(self) -> None:
+        if not self._failed:
+            self.console.print("[red]Initialization failed.[/red]")
+            return
+        body_lines = [
+            f"stage: {self._failed.stage_id}",
+            f"error: {_redact(self._failed.message)}",
+        ]
+        if self._failed.hint:
+            body_lines.append(f"hint: {_redact(self._failed.hint)}")
+        body = "\n".join(body_lines)
+        self.console.print(Panel(body, title="Initialization failed", box=box.ROUNDED, title_align="left"))
 
 
 class InitPlainRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
-        self._actions: list[tuple[str, Path]] = []
+        self._warnings: list[str] = []
+        self._project: Path | None = None
+        self._failed: ev.StageFailed | None = None
+        self._planned_count = 0
+        self._dry_run = False
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            self._project = Path(event.project_dir) if event.project_dir else None
+            self._dry_run = bool(event.options and event.options.get("dry_run"))
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.StageStarted) and event.stage_id == "plan_scaffold":
+            project = self._project or Path(".")
+            self.console.print(f"Initializing opactx project at {project}\n{RULE_LINE}")
+            return
         if isinstance(event, ev.FilePlanned):
             if event.path:
-                self._actions.append((event.op, Path(event.path)))
-            return
-        if isinstance(event, ev.StageCompleted) and event.stage_id == "plan":
-            for op, path in self._actions:
-                note = "new" if op == "CREATE" else "exists" if op == "SKIP" else ""
+                self._planned_count += 1
+                destination = Path(event.path)
+                note = "new" if event.op == "CREATE" else "exists" if event.op == "SKIP" else ""
                 suffix = f" ({note})" if note else ""
-                self.console.print(f"{op} {path}{suffix}")
+                self.console.print(f"{event.op:<9} {destination}{suffix}")
             return
-        if isinstance(event, ev.CommandCompleted) and event.ok:
-            self.console.print("Successfully initialized.")
-            self.console.print("Next steps: opactx build")
+        if isinstance(event, ev.StageStarted) and event.stage_id == "apply_scaffold":
+            if not self._dry_run:
+                self.console.print("Applying scaffold...")
+            return
+        if isinstance(event, ev.FileWritten):
+            if event.path:
+                self.console.print(f"WROTE {event.path} ({event.bytes})")
+            return
+        if isinstance(event, ev.FileWriteFailed):
+            message = _redact(event.message)
+            self.console.print(f"FAIL WRITE {event.path}: {message}")
+            return
+        if isinstance(event, ev.Warning):
+            self._warnings.append(_redact(event.message))
+            return
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            label = _stage_label(event.stage_id, INIT_STAGES)
+            self.console.print(f"{label} FAIL: {_redact(event.message)}")
+            return
+        if isinstance(event, ev.StageCompleted) and event.stage_id == "plan_scaffold":
+            self.console.print(f"Plan complete: {self._planned_count} ops")
+            return
+        if isinstance(event, ev.CommandCompleted):
+            if event.ok:
+                if not self._dry_run:
+                    self.console.print("INIT OK")
+                    self.console.print("Next:")
+                    self.console.print("- Edit context/standards.yaml")
+                    self.console.print("- Run: opactx validate")
+                    for warning in self._warnings:
+                        self.console.print(f"Warning: {warning}")
+            else:
+                if self._failed:
+                    self.console.print(f"Error: {_redact(self._failed.message)}")
+                else:
+                    self.console.print("Error: initialization failed")
 
 
 class ValidateRichRenderer(Renderer):
@@ -375,38 +613,59 @@ class ValidateRichRenderer(Renderer):
         self._errors: list[str] = []
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
         if isinstance(event, ev.StageCompleted):
             self._checks[event.stage_id] = event.status
             return
         if isinstance(event, ev.StageFailed):
             self._checks[event.stage_id] = "failed"
-            self._errors.append(event.message)
+            self._errors.append(_redact(event.message))
             return
         if isinstance(event, ev.Warning):
-            self._warnings.append(event.message)
+            self._warnings.append(_redact(event.message))
             return
         if isinstance(event, ev.SchemaValidationFailed):
             for item in event.errors[:20]:
-                self._errors.append(f"{item['path']}: {item['message']}")
+                self._errors.append(f"{item['path']}: {_redact(item['message'])}")
             return
         if isinstance(event, ev.CommandCompleted):
             self._render_summary()
 
     def _render_summary(self) -> None:
-        for stage_id, label in STAGES_VALIDATE:
+        table = Table(title="Preflight checks (no source fetching)", box=box.MINIMAL, title_justify="left")
+        table.add_column("Check", style="bold")
+        table.add_column("Status")
+        for stage_id, _label in VALIDATE_STAGES:
+            label = VALIDATE_CHECK_LABELS.get(stage_id, _label)
             status = self._checks.get(stage_id, "skipped")
+            glyph = STATUS_GLYPHS.get(status, STATUS_GLYPHS["skipped"])
+            detail = status
+            if stage_id == "resolve_plugins" and status == "skipped":
+                detail = "skipped (run --strict)"
+                glyph = STATUS_GLYPHS["warning"]
+            if stage_id == "schema_check" and status == "partial":
+                detail = "partial (sources not fetched)"
+                glyph = STATUS_GLYPHS["warning"]
             if status == "success":
-                self.console.print(f"{label} OK")
-            elif status == "partial":
-                self.console.print(f"{label}: partial")
-            elif status == "skipped":
-                self.console.print(f"{label}: skipped")
-            else:
-                self.console.print(f"{label} FAILED")
-        for warning in self._warnings:
-            self.console.print(f"[yellow]Warning:[/yellow] {warning}")
-        for error in self._errors:
-            self.console.print(f"[red]Error:[/red] {error}")
+                detail = "OK"
+            if status == "failed":
+                detail = "FAIL"
+            if status == "skipped" and stage_id != "resolve_plugins":
+                detail = "skipped"
+            table.add_row(label, f"{glyph}  {detail}")
+        self.console.print(Panel(table, title="Preflight checks", box=box.ROUNDED, title_align="left"))
+        if self._warnings:
+            warnings_text = "\n".join(f"- {warning}" for warning in self._warnings)
+            self.console.print(Panel(warnings_text, title="Warnings", box=box.ROUNDED, title_align="left"))
+        if self._errors:
+            errors_text = "\n".join(f"- {error}" for error in self._errors)
+            self.console.print(Panel(errors_text, title="Errors", box=box.ROUNDED, title_align="left"))
+        status_title = "✅ validate OK" if not any(
+            status == "failed" for status in self._checks.values()
+        ) else "❌ validate FAILED"
+        self.console.print(Panel("", title=status_title, box=box.ROUNDED, title_align="left"))
 
 
 class ValidatePlainRenderer(Renderer):
@@ -417,28 +676,75 @@ class ValidatePlainRenderer(Renderer):
         self._errors: list[str] = []
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.StageStarted):
+            label = VALIDATE_CHECK_LABELS.get(event.stage_id, _stage_label(event.stage_id, VALIDATE_STAGES))
+            index = _stage_index(event.stage_id, VALIDATE_STAGES)
+            line = _format_stage_start_line(index, label, len(VALIDATE_STAGES))
+            self.console.print(line)
+            return
+        if isinstance(event, ev.SchemaLoaded):
+            if event.path:
+                self.console.print(f"Schema loaded: {event.path}")
+            return
         if isinstance(event, ev.StageCompleted):
             self._checks[event.stage_id] = event.status
             return
         if isinstance(event, ev.StageFailed):
             self._checks[event.stage_id] = "failed"
-            self._errors.append(event.message)
+            self._errors.append(_redact(event.message))
+            label = VALIDATE_CHECK_LABELS.get(event.stage_id, _stage_label(event.stage_id, VALIDATE_STAGES))
+            self.console.print(f"{label} FAIL: {_redact(event.message)}")
+            return
+        if isinstance(event, ev.PluginResolved):
+            self.console.print(f"Plugin OK: {event.kind} {event.type_key}")
+            return
+        if isinstance(event, ev.PluginMissing):
+            self.console.print(f"Plugin missing: {event.kind} {event.type_key}")
             return
         if isinstance(event, ev.Warning):
-            self._warnings.append(event.message)
+            self._warnings.append(_redact(event.message))
             return
         if isinstance(event, ev.SchemaValidationFailed):
             for item in event.errors[:20]:
-                self._errors.append(f"{item['path']}: {item['message']}")
+                self._errors.append(f"{item['path']}: {_redact(item['message'])}")
             return
         if isinstance(event, ev.CommandCompleted):
-            for stage_id, label in STAGES_VALIDATE:
+            self.console.print("Preflight checks (no source fetching)")
+            self.console.print(RULE_LINE)
+            for stage_id, _label in VALIDATE_STAGES:
+                label = VALIDATE_CHECK_LABELS.get(stage_id, _label)
                 status = self._checks.get(stage_id, "skipped")
-                self.console.print(f"{label}: {status}")
-            for warning in self._warnings:
-                self.console.print(f"Warning: {warning}")
-            for error in self._errors:
-                self.console.print(f"Error: {error}")
+                if stage_id == "resolve_plugins" and status == "skipped":
+                    self.console.print(f"{label}: skipped (run --strict)")
+                elif stage_id == "schema_check" and status == "partial":
+                    self.console.print(f"{label}: partial (sources not fetched)")
+                else:
+                    label_status = status
+                    if status == "success":
+                        label_status = "OK"
+                    elif status == "failed":
+                        label_status = "FAIL"
+                    self.console.print(f"{label}: {label_status}")
+            if self._warnings:
+                self.console.print("")
+                self.console.print("Warnings")
+                self.console.print(RULE_LINE)
+                for warning in self._warnings:
+                    self.console.print(f"- {warning}")
+            if self._errors:
+                self.console.print("")
+                self.console.print("Errors")
+                self.console.print(RULE_LINE)
+                for error in self._errors:
+                    self.console.print(f"- {error}")
+            self.console.print("")
+            if event.ok:
+                self.console.print("VALIDATE OK")
+            else:
+                self.console.print("VALIDATE FAIL")
 
 
 class ValidateJsonRenderer(Renderer):
@@ -455,14 +761,20 @@ class ValidateJsonRenderer(Renderer):
             return
         if isinstance(event, ev.StageFailed):
             self._checks[event.stage_id] = "failed"
-            self._errors.append({"check": event.stage_id, "message": event.message})
+            self._errors.append({"check": event.stage_id, "message": _redact(event.message)})
             return
         if isinstance(event, ev.Warning):
-            self._warnings.append(event.message)
+            self._warnings.append(_redact(event.message))
             return
         if isinstance(event, ev.SchemaValidationFailed):
             for item in event.errors[:20]:
-                self._errors.append({"check": "schema_check", "message": item["message"], "path": item["path"]})
+                self._errors.append(
+                    {
+                        "check": "schema_check",
+                        "message": _redact(item["message"]),
+                        "path": item["path"],
+                    }
+                )
             return
         if isinstance(event, ev.CommandCompleted):
             self._ok = event.ok
@@ -478,103 +790,194 @@ class ValidateJsonRenderer(Renderer):
 class InspectRichRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
+        self._bundle_path: Path | None = None
         self._manifest: ev.ManifestRead | None = None
         self._summary: ev.ContextSummary | None = None
         self._path: ev.PathExtracted | None = None
+        self._failed: ev.StageFailed | None = None
+        self._data_bytes: int | None = None
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            self._bundle_path = Path(event.project_dir) if event.project_dir else None
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.StageStarted):
+            label = _stage_label(event.stage_id, INSPECT_STAGES)
+            index = _stage_index(event.stage_id, INSPECT_STAGES)
+            line = _format_stage_start_line(index, label, len(INSPECT_STAGES))
+            self.console.print(line)
+            return
+        if isinstance(event, ev.BundleOpened):
+            if event.path:
+                self.console.print(f"Inspect bundle: {event.path}")
+            return
         if isinstance(event, ev.ManifestRead):
             self._manifest = event
             return
         if isinstance(event, ev.ContextSummary):
             self._summary = event
             return
+        if isinstance(event, ev.DataRead):
+            self._data_bytes = event.bytes
+            return
         if isinstance(event, ev.PathExtracted):
             self._path = event
             return
-        if isinstance(event, ev.CommandCompleted) and event.ok:
-            self._render()
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            return
+        if isinstance(event, ev.CommandCompleted):
+            if event.ok:
+                self._render()
+            else:
+                self._render_error()
 
     def _render(self) -> None:
         if self._manifest:
-            body = "\n".join(
-                [
-                    f"Revision: {self._manifest.revision}",
-                    f"Roots:    {', '.join(self._manifest.roots or [])}",
-                ]
-            )
-            self.console.print(Panel(body, title="Bundle", box=box.ROUNDED, title_align="left"))
+            bundle_path = self._bundle_path or Path(".")
+            size_line = ""
+            if self._data_bytes is not None:
+                size_line = f"Size:      {_format_bytes(self._data_bytes)}"
+            body_lines = [
+                f"Path:      {bundle_path}",
+                f"Revision:  {self._manifest.revision}",
+                f"Roots:     {self._manifest.roots}",
+            ]
+            if size_line:
+                body_lines.append(size_line)
+            body = "\n".join(body_lines)
+            self.console.print(Panel(body, title="Bundle summary", box=box.ROUNDED, title_align="left"))
         if self._summary:
-            table = Table(title="Context summary", box=box.ROUNDED, title_align="left")
-            table.add_column("Section")
-            table.add_column("Count", justify="right")
+            table = Table(show_header=True, box=box.MINIMAL)
+            table.add_column("SECTION")
+            table.add_column("STATUS")
+            table.add_column("KEYS", justify="right")
             counts = self._summary.counts or {}
             for key in self._summary.keys:
-                table.add_row(key, str(counts.get(key, 0)))
-            self.console.print(table)
+                table.add_row(key, STATUS_GLYPHS["success"], str(counts.get(key, 0)))
+            self.console.print(
+                Panel(table, title="Context overview (data.context)", box=box.ROUNDED, title_align="left")
+            )
         if self._path:
             body = "\n".join(
                 [
-                    f"Path: {self._path.path_pointer}",
-                    f"Type: {self._path.value_type}",
+                    f"TYPE: {self._path.value_type}",
                     "",
                     self._path.preview,
                 ]
             )
-            self.console.print(Panel(body, title="Path result", box=box.ROUNDED, title_align="left"))
+            self.console.print(Panel(body, title=self._path.path_pointer, box=box.ROUNDED, title_align="left"))
+
+    def _render_error(self) -> None:
+        if not self._failed:
+            self.console.print("[red]Inspect failed.[/red]")
+            return
+        body = "\n".join(
+            [
+                f"stage: {self._failed.stage_id}",
+                f"error: {_redact(self._failed.message)}",
+            ]
+        )
+        if self._failed.hint:
+            body = "\n".join([body, f"hint: {_redact(self._failed.hint)}"])
+        self.console.print(Panel(body, title="Inspect failed", box=box.ROUNDED, title_align="left"))
 
 
 class InspectPlainRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
+        self._bundle_path: Path | None = None
         self._manifest: ev.ManifestRead | None = None
         self._summary: ev.ContextSummary | None = None
         self._path: ev.PathExtracted | None = None
+        self._failed: ev.StageFailed | None = None
+        self._data_bytes: int | None = None
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            self._bundle_path = Path(event.project_dir) if event.project_dir else None
+            _print_header(self.console, event)
+            return
         if isinstance(event, ev.ManifestRead):
             self._manifest = event
             return
         if isinstance(event, ev.ContextSummary):
             self._summary = event
             return
+        if isinstance(event, ev.DataRead):
+            self._data_bytes = event.bytes
+            return
         if isinstance(event, ev.PathExtracted):
             self._path = event
             return
-        if isinstance(event, ev.CommandCompleted) and event.ok:
-            if self._manifest:
-                self.console.print(f"Revision: {self._manifest.revision}")
-                self.console.print(f"Roots: {', '.join(self._manifest.roots or [])}")
-            if self._summary:
-                counts = self._summary.counts or {}
-                for key in self._summary.keys:
-                    self.console.print(f"{key}: {counts.get(key, 0)}")
-            if self._path:
-                self.console.print(f"Path {self._path.path_pointer}: {self._path.preview}")
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            return
+        if isinstance(event, ev.CommandCompleted):
+            if event.ok:
+                if self._manifest:
+                    bundle_path = self._bundle_path or Path(".")
+                    self.console.print("Bundle summary")
+                    self.console.print(RULE_LINE)
+                    self.console.print(f"Path: {bundle_path}")
+                    self.console.print(f"Revision: {self._manifest.revision}")
+                    self.console.print(f"Roots: {self._manifest.roots}")
+                    if self._data_bytes is not None:
+                        self.console.print(f"Size: {_format_bytes(self._data_bytes)}")
+                if self._summary:
+                    counts = self._summary.counts or {}
+                    self.console.print("Context overview (data.context)")
+                    self.console.print(RULE_LINE)
+                    self.console.print(
+                        "Context: "
+                        + " ".join(
+                            f"{key}={counts.get(key, 0)}" for key in self._summary.keys
+                        )
+                    )
+                if self._path:
+                    self.console.print(self._path.path_pointer)
+                    self.console.print(RULE_LINE)
+                    self.console.print(f"TYPE: {self._path.value_type}")
+                    self.console.print("")
+                    self.console.print(self._path.preview)
+            else:
+                if self._failed:
+                    self.console.print(f"Error: {_redact(self._failed.message)}")
+                else:
+                    self.console.print("Error: inspect failed")
 
 
 class InspectJsonRenderer(Renderer):
     def __init__(self, console: Console):
         self.console = console
+        self._bundle_path: Path | None = None
         self._manifest: ev.ManifestRead | None = None
         self._summary: ev.ContextSummary | None = None
         self._path: ev.PathExtracted | None = None
         self._ok = True
+        self._data_bytes: int | None = None
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            self._bundle_path = Path(event.project_dir) if event.project_dir else None
         if isinstance(event, ev.ManifestRead):
             self._manifest = event
         if isinstance(event, ev.ContextSummary):
             self._summary = event
+        if isinstance(event, ev.DataRead):
+            self._data_bytes = event.bytes
         if isinstance(event, ev.PathExtracted):
             self._path = event
         if isinstance(event, ev.CommandCompleted):
             self._ok = event.ok
             payload = {
                 "ok": self._ok,
+                "bundle_path": str(self._bundle_path) if self._bundle_path else None,
                 "manifest": self._manifest.to_dict() if self._manifest else None,
                 "summary": self._summary.to_dict() if self._summary else None,
                 "path": self._path.to_dict() if self._path else None,
+                "data_bytes": self._data_bytes,
             }
             self.console.print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -584,8 +987,11 @@ class ListPluginsRichRenderer(Renderer):
         self.console = console
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
         if isinstance(event, ev.PluginsDiscovered):
-            table = Table(title=f"{event.kind} plugins", box=box.ROUNDED, title_align="left")
+            table = Table(title=f"{event.kind} plugins", box=box.ROUNDED, title_justify="left")
             table.add_column("TYPE", style="bold")
             table.add_column("IMPL")
             for plugin in event.plugins:
@@ -598,6 +1004,9 @@ class ListPluginsPlainRenderer(Renderer):
         self.console = console
 
     def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
         if isinstance(event, ev.PluginsDiscovered):
             self.console.print(f"{event.kind} plugins:")
             for plugin in event.plugins:
@@ -616,29 +1025,176 @@ class ListPluginsJsonRenderer(Renderer):
             self.console.print(json.dumps({"ok": event.ok, "plugins": self._plugins}, indent=2, sort_keys=True))
 
 
+class RunOpaRichRenderer(Renderer):
+    def __init__(self, console: Console):
+        self.console = console
+        self._failed: ev.StageFailed | None = None
+
+    def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.OpaStartPlanned):
+            bundle = event.bundle_path or Path("dist/bundle")
+            policy = event.policy_paths[0] if event.policy_paths else Path("policy")
+            body = "\n".join(
+                [
+                    f"Bundle:  {bundle}",
+                    f"Policy:  {policy}",
+                    f"Address: {event.address}",
+                ]
+            )
+            self.console.print(
+                Panel(body, title="Starting OPA (development mode)", box=box.ROUNDED, title_align="left")
+            )
+            return
+        if isinstance(event, ev.OpaProcessStarted):
+            self.console.print("\nOPA running (Ctrl+C to stop)")
+            return
+        if isinstance(event, ev.OpaStdout):
+            if event.line:
+                self.console.print(event.line)
+            return
+        if isinstance(event, ev.OpaStderr):
+            if event.line:
+                self.console.print(event.line)
+            return
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            return
+        if isinstance(event, ev.OpaProcessExited):
+            body = f"Exit code: {event.exit_code}"
+            self.console.print(Panel(body, title="OPA stopped", box=box.ROUNDED, title_align="left"))
+            return
+        if isinstance(event, ev.CommandCompleted) and not event.ok:
+            self._print_error()
+
+    def _print_error(self) -> None:
+        if not self._failed:
+            self.console.print("[red]OPA failed to start.[/red]")
+            return
+        body = "\n".join(
+            [
+                f"stage: {self._failed.stage_id}",
+                f"error: {_redact(self._failed.message)}",
+            ]
+        )
+        self.console.print(Panel(body, title="OPA failed", box=box.ROUNDED, title_align="left"))
+
+
+class RunOpaPlainRenderer(Renderer):
+    def __init__(self, console: Console):
+        self.console = console
+        self._failed: ev.StageFailed | None = None
+
+    def handle(self, event: ev.OpactxEvent) -> None:
+        if isinstance(event, ev.CommandStarted):
+            _print_header(self.console, event)
+            return
+        if isinstance(event, ev.OpaStartPlanned):
+            bundle = event.bundle_path or Path("dist/bundle")
+            policy = event.policy_paths[0] if event.policy_paths else Path("policy")
+            self.console.print(
+                f"OPA START address={event.address} bundle={bundle} policy={policy}"
+            )
+            return
+        if isinstance(event, ev.OpaProcessStarted):
+            self.console.print(f"\nOPA PID {event.pid}")
+            return
+        if isinstance(event, ev.OpaStdout):
+            if event.line:
+                self.console.print(event.line)
+            return
+        if isinstance(event, ev.OpaStderr):
+            if event.line:
+                self.console.print(event.line)
+            return
+        if isinstance(event, ev.StageFailed):
+            self._failed = event
+            return
+        if isinstance(event, ev.OpaProcessExited):
+            self.console.print(f"\nOPA EXIT code={event.exit_code}")
+            return
+        if isinstance(event, ev.CommandCompleted) and not event.ok:
+            if self._failed:
+                self.console.print(f"Error: {_redact(self._failed.message)}")
+            else:
+                self.console.print("Error: OPA failed")
+
+
 def _format_duration(elapsed_ms: float) -> str:
-    if elapsed_ms < 1:
-        return f"{elapsed_ms * 1000:.0f}ms"
-    if elapsed_ms < 10:
-        return f"{elapsed_ms:.2f}s"
-    return f"{elapsed_ms:.1f}s"
+    if elapsed_ms < 1000:
+        return f"{elapsed_ms:.0f}ms"
+    seconds = elapsed_ms / 1000
+    if seconds < 10:
+        return f"{seconds:.2f}s"
+    return f"{seconds:.1f}s"
 
 
-def _format_stage_line(index: int, label: str, status: str, elapsed_ms: float | None) -> str:
-    glyph = {
-        "pending": "⏸",
-        "running": "⠋",
-        "success": "✅",
-        "failed": "❌",
-        "skipped": "⏭",
-        "partial": "⚠️",
-    }.get(status, "?")
+def _format_bytes(num: int) -> str:
+    size = float(num)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{size:.0f} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _print_header(console: Console, event: ev.CommandStarted) -> None:
+    project = event.project_dir or Path(".")
+    config = event.config_path or Path("opactx.yaml")
+    console.print(f"opactx v{__version__} | project: {project} | config: {config}\n{RULE_LINE}")
+
+
+_REDACT_PATTERN = re.compile(
+    r"(?i)\b(authorization|token|secret|password|api_key)\b\s*[:=]\s*[^\s]+"
+)
+
+
+def _redact(text: str) -> str:
+    if not text:
+        return text
+    return _REDACT_PATTERN.sub(r"\1: <redacted>", text)
+
+
+def _format_stage_line(
+    index: int,
+    label: str,
+    status: str,
+    elapsed_ms: float | None,
+    progress: tuple[int, int] | None = None,
+    note: str | None = None,
+    total: int = 6,
+    include_status_word: bool = False,
+) -> str:
+    glyph = STATUS_GLYPHS.get(status, "?")
     suffix = ""
     if status == "running":
-        suffix = " running"
+        if progress:
+            suffix = f" running ({progress[0]}/{progress[1]})"
+        else:
+            suffix = " running"
+    elif status in {"skipped", "partial", "failed"} and not include_status_word:
+        suffix = f" {status}"
+    if include_status_word and status in {"success", "failed", "skipped", "partial"}:
+        suffix = f" {_status_word(status)}"
+    if note:
+        suffix = f"{suffix} {note}".rstrip()
     duration = f"  {_format_duration(elapsed_ms)}" if elapsed_ms is not None else ""
     padding = "." * max(2, 28 - len(label))
-    return f"[{index}/6] {label} {padding} {glyph}{suffix}{duration}"
+    total_display = total if total > 0 else 0
+    return f"[{index}/{total_display}] {label} {padding} {glyph}{suffix}{duration}"
+
+
+def _format_stage_start_line(index: int, label: str, total: int, note: str | None = None) -> str:
+    padding = "." * max(2, 28 - len(label))
+    total_display = total if total > 0 else 0
+    suffix = f" START"
+    if note:
+        suffix = f"{suffix} {note}"
+    return f"[{index}/{total_display}] {label} {padding}{suffix}"
 
 
 def _stage_label(stage_id: str, mapping: list[tuple[str, str]]) -> str:
@@ -648,8 +1204,24 @@ def _stage_label(stage_id: str, mapping: list[tuple[str, str]]) -> str:
     return stage_id
 
 
-def _sources_table(states: Iterable[SourceState]) -> Table:
-    table = Table(title="Sources", show_header=True, box=box.ROUNDED, title_align="left")
+def _stage_index(stage_id: str, mapping: list[tuple[str, str]]) -> int:
+    for index, (key, _label) in enumerate(mapping, start=1):
+        if key == stage_id:
+            return index
+    return 0
+
+
+def _status_word(status: str) -> str:
+    return {
+        "success": "OK",
+        "failed": "FAIL",
+        "skipped": "SKIP",
+        "partial": "PARTIAL",
+    }.get(status, status.upper())
+
+
+def _sources_table(states: Iterable[SourceState], title: str | None = "Sources") -> Table:
+    table = Table(title=title, show_header=True, box=box.MINIMAL, title_justify="left")
     table.add_column("NAME", style="bold")
     table.add_column("TYPE")
     table.add_column("STATUS")
@@ -657,10 +1229,10 @@ def _sources_table(states: Iterable[SourceState]) -> Table:
     table.add_column("NOTES")
     for state in states:
         glyph = {
-            "waiting": "⏸",
-            "fetching": "⠋",
-            "done": "✅",
-            "failed": "❌",
+            "waiting": STATUS_GLYPHS["pending"],
+            "fetching": STATUS_GLYPHS["running"],
+            "done": STATUS_GLYPHS["success"],
+            "failed": STATUS_GLYPHS["failed"],
         }.get(state.status, "?")
         duration = _format_duration(state.elapsed_ms) if state.elapsed_ms is not None else ""
         table.add_row(
@@ -668,22 +1240,16 @@ def _sources_table(states: Iterable[SourceState]) -> Table:
             state.source_type,
             f"{glyph} {state.status}",
             duration,
-            state.note or "",
+            _redact(state.note) if state.note else "",
         )
     return table
-
-
-def _format_source_line(name: str, status: str, elapsed_ms: float | None, note: str | None) -> str:
-    duration = _format_duration(elapsed_ms) if elapsed_ms is not None else ""
-    suffix = f" ({note})" if note else ""
-    return f"source {name}: {status} {duration}{suffix}"
 
 
 def _source_failure_panel(event: ev.SourceFetchFailed) -> Panel:
     body = "\n".join(
         [
             f"source: {event.name} (type={event.type_key})",
-            f"error: {event.message}",
+            f"error: {_redact(event.message)}",
             "hint: check credentials; run with --debug for details",
         ]
     )
@@ -691,17 +1257,16 @@ def _source_failure_panel(event: ev.SourceFetchFailed) -> Panel:
 
 
 def _schema_failure_panel(event: ev.SchemaValidationFailed) -> Panel:
-    lines = [f"{item['path']}: {item['message']}" for item in event.errors[:20]]
+    lines = [f"{item['path']}: {_redact(item['message'])}" for item in event.errors[:20]]
     if len(event.errors) > 20:
         lines.append(f"...and {len(event.errors) - 20} more")
     body = "\n".join(
         [
-            f"{event.schema_path}",
-            "",
             *lines,
             "",
-            "Hints:",
-            "- Check context/standards.yaml and connector output shape.",
+            "Hint:",
+            "- Check context/standards.yaml and connector output shape",
+            "- Run: opactx inspect dist/bundle --path /sources/iam",
         ]
     )
     return Panel(
@@ -716,19 +1281,9 @@ def _stage_failure_panel(event: ev.StageFailed) -> Panel:
     body = "\n".join(
         [
             f"stage: {event.stage_id}",
-            f"error: {event.message}",
+            f"error: {_redact(event.message)}",
         ]
     )
     if event.hint:
-        body = "\n".join([body, f"hint: {event.hint}"])
+        body = "\n".join([body, f"hint: {_redact(event.hint)}"])
     return Panel(body, title="Build failed", box=box.ROUNDED, title_align="left")
-
-
-def _init_label(minimal: bool, with_examples: bool, no_policy: bool) -> str:
-    if minimal:
-        return "Initializing minimal template"
-    if with_examples:
-        return "Initializing template with examples"
-    if no_policy:
-        return "Initializing template without policy"
-    return "Initializing standard template"

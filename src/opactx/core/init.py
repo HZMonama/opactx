@@ -38,16 +38,21 @@ def init_events(
         "no_policy": no_policy,
         "schema": schema,
     }
-    yield ev.CommandStarted(command="init", project_dir=project, options=options)
+    yield ev.CommandStarted(
+        command="init",
+        project_dir=project,
+        config_path=project / "opactx.yaml",
+        options=options,
+    )
 
     started = time.perf_counter()
-    yield ev.StageStarted(command="init", stage_id="resolve", label="Resolve target")
+    yield ev.StageStarted(command="init", stage_id="resolve_target", label="Resolve target directory")
     schema = schema.lower()
     if schema not in {"jsonschema", "openapi"}:
         duration_ms = _elapsed_ms(started)
         yield ev.StageFailed(
             command="init",
-            stage_id="resolve",
+            stage_id="resolve_target",
             duration_ms=duration_ms,
             error_code="invalid_schema",
             message=f"Unknown schema type: {schema}",
@@ -58,7 +63,7 @@ def init_events(
         duration_ms = _elapsed_ms(started)
         yield ev.StageFailed(
             command="init",
-            stage_id="resolve",
+            stage_id="resolve_target",
             duration_ms=duration_ms,
             error_code="unsupported_schema",
             message="OpenAPI scaffolding is not supported yet.",
@@ -69,7 +74,7 @@ def init_events(
         duration_ms = _elapsed_ms(started)
         yield ev.StageFailed(
             command="init",
-            stage_id="resolve",
+            stage_id="resolve_target",
             duration_ms=duration_ms,
             error_code="invalid_path",
             message="Target path exists and is a file.",
@@ -86,10 +91,10 @@ def init_events(
         )
 
     duration_ms = _elapsed_ms(started)
-    yield ev.StageCompleted(command="init", stage_id="resolve", duration_ms=duration_ms)
+    yield ev.StageCompleted(command="init", stage_id="resolve_target", duration_ms=duration_ms)
 
     started = time.perf_counter()
-    yield ev.StageStarted(command="init", stage_id="plan", label="Plan scaffold")
+    yield ev.StageStarted(command="init", stage_id="plan_scaffold", label="Plan scaffold")
     project_name = name or project.resolve().name
     files = _scaffold_files(
         minimal=minimal,
@@ -101,14 +106,20 @@ def init_events(
     for action, destination in actions:
         yield ev.FilePlanned(command="init", op=action, path=destination)
     duration_ms = _elapsed_ms(started)
-    yield ev.StageCompleted(command="init", stage_id="plan", duration_ms=duration_ms)
-
-    if dry_run:
-        yield ev.CommandCompleted(command="init", ok=True, exit_code=0)
-        return
+    yield ev.StageCompleted(command="init", stage_id="plan_scaffold", duration_ms=duration_ms)
 
     started = time.perf_counter()
-    yield ev.StageStarted(command="init", stage_id="apply", label="Apply scaffold")
+    yield ev.StageStarted(command="init", stage_id="apply_scaffold", label="Apply scaffold")
+    if dry_run:
+        duration_ms = _elapsed_ms(started)
+        yield ev.StageCompleted(
+            command="init",
+            stage_id="apply_scaffold",
+            duration_ms=duration_ms,
+            status="skipped",
+        )
+        yield ev.CommandCompleted(command="init", ok=True, exit_code=0)
+        return
     try:
         project.mkdir(parents=True, exist_ok=True)
         file_map = {project / f.destination_path: f for f in files}
@@ -129,7 +140,7 @@ def init_events(
         yield ev.FileWriteFailed(command="init", path=project, message=str(exc))
         yield ev.StageFailed(
             command="init",
-            stage_id="apply",
+            stage_id="apply_scaffold",
             duration_ms=duration_ms,
             error_code="write_failed",
             message=f"Failed to write scaffold: {exc}",
@@ -138,7 +149,7 @@ def init_events(
         return
 
     duration_ms = _elapsed_ms(started)
-    yield ev.StageCompleted(command="init", stage_id="apply", duration_ms=duration_ms)
+    yield ev.StageCompleted(command="init", stage_id="apply_scaffold", duration_ms=duration_ms)
     yield ev.CommandCompleted(command="init", ok=True, exit_code=0)
 
 

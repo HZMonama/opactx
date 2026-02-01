@@ -171,6 +171,12 @@ class SourceFetchFailed(OpactxEvent):
 
 
 @dataclass(frozen=True)
+class SourcesPlanned(OpactxEvent):
+    type: str = "SourcesPlanned"
+    sources: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class BundleWriteStarted(OpactxEvent):
     type: str = "BundleWriteStarted"
     out_dir: Path | None = None
@@ -233,6 +239,39 @@ class PluginsDiscovered(OpactxEvent):
     type: str = "PluginsDiscovered"
     kind: str = ""
     plugins: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OpaStartPlanned(OpactxEvent):
+    type: str = "OpaStartPlanned"
+    address: str = ""
+    bundle_path: Path | None = None
+    policy_paths: list[Path] = field(default_factory=list)
+    args: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class OpaProcessStarted(OpactxEvent):
+    type: str = "OpaProcessStarted"
+    pid: int = 0
+
+
+@dataclass(frozen=True)
+class OpaStdout(OpactxEvent):
+    type: str = "OpaStdout"
+    line: str = ""
+
+
+@dataclass(frozen=True)
+class OpaStderr(OpactxEvent):
+    type: str = "OpaStderr"
+    line: str = ""
+
+
+@dataclass(frozen=True)
+class OpaProcessExited(OpactxEvent):
+    type: str = "OpaProcessExited"
+    exit_code: int = 0
 
 
 def _serialize(value: Any) -> Any:

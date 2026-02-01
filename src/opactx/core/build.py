@@ -6,13 +6,13 @@ import shutil
 import tarfile
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
 
 from opactx.config.load import ConfigError, load_config, load_yaml_mapping
-from opactx.config.model import Config, Transform
+from opactx.config.model import Config
 from opactx.core import events as ev
 from opactx.plugins.registry import load_source, load_transform
 from opactx.transforms.builtin import canonicalize
@@ -68,6 +68,17 @@ def build_events(
         duration_ms=duration_ms,
         status="success",
     )
+    if config.sources:
+        sources_planned = []
+        for source in config.sources:
+            sources_planned.append(
+                {
+                    "name": source.name,
+                    "type": source.type,
+                    "notes": _source_note(source),
+                }
+            )
+        yield ev.SourcesPlanned(command="build", sources=sources_planned)
 
     yield ev.StageStarted(command="build", stage_id="load_intent", label="Load intent context")
     started = time.perf_counter()
@@ -152,6 +163,7 @@ def build_events(
     revision = hashlib.sha256(data_bytes).hexdigest()
 
     if dry_run:
+        yield ev.StageStarted(command="build", stage_id="write_bundle", label="Write bundle")
         yield ev.BundleWriteStarted(command="build", out_dir=output_path)
         yield ev.StageCompleted(
             command="build",
@@ -209,7 +221,19 @@ def _run_stage_fetch_sources(
         ev.StageStarted(command="build", stage_id="fetch_sources", label="Fetch sources")
     ]
     sources: dict[str, Any] = {}
+    errors: list[str] = []
     total = len(config.sources)
+    if total == 0:
+        duration_ms = _elapsed_ms(started)
+        events.append(
+            ev.StageCompleted(
+                command="build",
+                stage_id="fetch_sources",
+                duration_ms=duration_ms,
+                status="skipped",
+            )
+        )
+        return _StageResultWithEvents(events=events, value=sources, failed=False)
     completed = 0
     for source in config.sources:
         note = _source_note(source)
@@ -258,19 +282,44 @@ def _run_stage_fetch_sources(
                     notes=note,
                 )
             )
-            duration_ms_stage = _elapsed_ms(started)
+            errors.append(str(exc))
+            if fail_fast:
+                duration_ms_stage = _elapsed_ms(started)
+                events.append(
+                    ev.StageFailed(
+                        command="build",
+                        stage_id="fetch_sources",
+                        duration_ms=duration_ms_stage,
+                        error_code="source_error",
+                        message=str(exc),
+                    )
+                )
+                return _StageResultWithEvents(events=events, failed=True)
+            completed += 1
             events.append(
-                ev.StageFailed(
+                ev.StageProgress(
                     command="build",
                     stage_id="fetch_sources",
-                    duration_ms=duration_ms_stage,
-                    error_code="source_error",
-                    message=str(exc),
+                    current=completed,
+                    total=total,
                 )
             )
-            return _StageResultWithEvents(events=events, failed=True)
+            continue
         if not fail_fast and completed != total:
             continue
+
+    if errors:
+        duration_ms_stage = _elapsed_ms(started)
+        events.append(
+            ev.StageFailed(
+                command="build",
+                stage_id="fetch_sources",
+                duration_ms=duration_ms_stage,
+                error_code="source_error",
+                message="One or more sources failed.",
+            )
+        )
+        return _StageResultWithEvents(events=events, failed=True)
 
     duration_ms = _elapsed_ms(started)
     events.append(
@@ -391,7 +440,7 @@ def _run_stage_write_bundle(
                 shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "data.json").write_bytes(data_bytes)
-        manifest = {"revision": revision, "roots": ["data.json"]}
+        manifest = {"revision": revision, "roots": ["context"]}
         (output_dir / ".manifest").write_bytes(_stable_json_bytes(manifest))
         if tarball:
             _write_tarball(output_dir)
