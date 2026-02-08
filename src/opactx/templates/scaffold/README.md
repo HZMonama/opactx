@@ -2,6 +2,7 @@
 
 opactx is a contract-first context compiler that produces OPA bundles. This project
 defines a schema and curated context inputs for policy evaluation.
+Docs: https://opactx.gitbook.io/opactx/
 
 ## Quickstart
 
@@ -18,5 +19,5 @@ Bundle output: `dist/bundle/`.
 ## Project layout
 
 - `opactx.yaml` - build configuration and sources.
-- `schema/` - contract for the context shape.
-- `context/` - standards and exceptions that become `data.context.*`.
+- `schema/context.schema.yaml` - authoring DSL for the context contract (or `.json` with `--json-schema`).
+- `context/` - curated intent inputs merged into the policy-facing contract.

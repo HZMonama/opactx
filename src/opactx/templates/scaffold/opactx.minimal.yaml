@@ -1,6 +1,9 @@
+# Minimal opactx pipeline configuration.
+# Docs: https://opactx.gitbook.io/opactx/
+
 version: v1
 
-schema: schema/context.schema.json
+schema: schema/context.schema.yaml
 context_dir: context
 
 sources: []

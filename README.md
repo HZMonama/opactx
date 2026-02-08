@@ -2,248 +2,110 @@
 
 opactx is a contract-first context compiler for Open Policy Agent (OPA).
 
-It assembles human-owned intent and external system data into a deterministic, schema-validated
-context bundle that OPA can consume safely and consistently.
+It assembles intent plus source data into a deterministic `data.context`, validates it against JSON Schema, and writes an OPA bundle.
 
-Policies should depend on stable data.
-opactx makes unstable data conform to a stable contract.
+## Why opactx
 
-## Why opactx exists
+OPA evaluates policy, but it does not enforce context contracts for you.
 
-OPA evaluates policies against input and data — but it does not:
+opactx exists to:
 
-- validate the shape of data
-- protect against schema drift
-- manage external context sources
-- enforce determinism or auditability
+- prevent schema drift from silently breaking policy
+- normalize mixed source payloads into one canonical context shape
+- keep builds deterministic and auditable
 
-In real systems, policy context comes from:
+## Build model
 
-- YAML standards
-- exception lists
-- APIs
-- CLIs
-- inventories
-- directories
+`opactx build` follows this flow:
 
-That data is messy, changes over time, and breaks policies silently.
+1. Load config (`opactx.yaml`)
+2. Load intent (`context/standards.yaml`, optional `context/exceptions.yaml`)
+3. Fetch source payloads
+4. Apply transforms
+5. Validate final context against JSON Schema
+6. Emit deterministic bundle output (`data.json`, `.manifest`)
 
-opactx solves this by acting as a compiler.
+Schema validation is always enforced in build.
 
-It:
+## Built-in transforms
 
-- gathers context from multiple sources
-- normalizes it into a canonical shape
-- validates it against an explicit schema
-- emits a deterministic OPA bundle
+opactx ships built-in transforms for context assembly:
 
-OPA only ever sees clean, shaped input.
+- `mount`
+- `merge`
+- `pick`
+- `rename`
+- `coerce`
+- `defaults`
+- `validate_schema`
+- `ref_resolve`
+- `sort_stable`
+- `dedupe`
+- `canonicalize` (compatibility/default canonical shape)
 
-## Mental model
+Full semantics and examples: `TRANSFORMS.md`.
 
-Think of opactx as:
+## File roles
 
-gcc for policy context
+Use these roles for clarity:
 
-YAML + APIs + scripts → context  
-JSON Schema → ABI  
-Bundle → binary  
-OPA → runtime
+- `opactx.yaml`
+  Pipeline config: sources, transforms, schema path, output settings.
+- `schema/context.schema.yaml`
+  Human authoring format for the contract (recommended source of truth).
+- `build/schema/context.schema.json`
+  Compiled JSON Schema artifact used for machine validation; do not hand edit.
 
-## What opactx is (and is not)
+At build time, opactx validates against the configured schema path:
 
-opactx is:
+- `.yaml` / `.yml`: compiles DSL to JSON Schema first
+- `.json`: uses JSON Schema directly
 
-- a build-time tool
-- deterministic
-- schema-first
-- audit-friendly
-- OPA-native (bundles, manifests)
+DSL reference: `SCHEMA_DSL.md`.
+`opactx validate` runs DSL meta-schema validation before compile when schema is YAML.
 
-opactx is not:
+## Bundle shape
 
-- a policy engine
-- an OPA replacement
-- a runtime service
-- a data lake
-- a workflow orchestrator
+`opactx build` writes:
 
-## Core concepts
-
-### 1) Context contract (context.schema.json)
-
-Defines the exact shape of data.context.
-
-If the compiled context doesn’t match the schema, the build fails.
-
-This prevents:
-
-- silent policy breakage
-- undefined behavior in Rego
-- production surprises
-
-### 2) Intent (context/*.yaml)
-
-Human-authored, reviewable files:
-
-- standards.yaml
-- exceptions.yaml
-
-These describe what should be true, not how to fetch it.
-
-### 3) Sources (connectors)
-
-Declarative connectors defined in opactx.yaml:
-
-- file
-- http
-- exec
-- plugins via entry points
-
-Sources fetch reality.
-
-### 4) Transforms
-
-Transforms normalize raw source data into the canonical contract.
-
-Policies never depend on raw source output.
-
-### 5) Bundle output
-
-opactx build produces an OPA bundle:
-
-```
+```text
 dist/bundle/
-├─ data.json      # { "context": ... }
-└─ .manifest      # revision + roots
+  data.json    # { "context": ... }
+  .manifest    # revision + roots
 ```
 
-This bundle is what you deploy.
+## Install
 
-## Installation
-
-```
+```bash
 pip install opactx
 ```
 
-or (recommended for isolation):
+or:
 
-```
+```bash
 pipx install opactx
 ```
 
 ## Quick start
 
-Initialize a project:
-
-```
+```bash
 opactx init --with-examples
-```
-
-Validate config and intent (fast, no network):
-
-```
 opactx validate --strict
-```
-
-Build the context bundle:
-
-```
 opactx build
-```
-
-Inspect the output:
-
-```
 opactx inspect dist/bundle
 ```
-
-## Example policy usage
-
-With opactx, policies depend on a stable namespace:
-
-```
-data.context.standards
-data.context.exceptions
-data.context.sources
-```
-
-They never depend on raw APIs or ad-hoc data layouts.
-
-This keeps Rego:
-
-- simple
-- testable
-- portable
-
-## Development workflow (dev → prod)
-
-Develop
-
-- edit context/*.yaml
-- adjust sources/transforms
-- run opactx validate
-
-Build
-
-- opactx build
-- generate deterministic bundle
-
-Test
-
-- run OPA / conftest against the bundle
-
-CI
-
-- validate + build
-- publish bundle artifact
-
-Deploy
-
-- promote the same bundle to staging and prod
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| opactx init | Scaffold a new project |
-| opactx validate | Fast preflight checks (no source fetching) |
-| opactx build | Compile context into an OPA bundle |
-| opactx inspect | Inspect bundles and context |
-| opactx run-opa | Dev-only wrapper to run OPA with a bundle |
-
-## Design principles
-
-Contract first  
-Policies depend on schema, not data shape accidents.
-
-Fail early  
-Invalid context fails at build time, not in production.
-
-Deterministic  
-Same inputs → same bundle bytes.
-
-Separation of concerns  
-opactx builds context; OPA evaluates policy.
-
-Auditability  
-Every bundle has a revision you can trace.
-
-## Status
-
-⚠️ Early-stage / experimental
-
-APIs may evolve  
-schemas should be versioned carefully  
-feedback welcome
+| `opactx init` | Scaffold a project |
+| `opactx validate` | Preflight config/schema checks (no source fetching) |
+| `opactx build` | Compile context and produce OPA bundle |
+| `opactx inspect` | Inspect bundle contents |
+| `opactx run-opa` | Run OPA locally with a bundle |
+| `opactx list-plugins` | List source/transform plugin entry points |
 
 ## Contributing
 
-Contributions are welcome, especially:
-
-- source plugins
-- transform patterns
-- real-world schemas
-- test cases
-
-Please read CONTRIBUTING.md before opening a PR.
+See `CONTRIBUTING.md`.

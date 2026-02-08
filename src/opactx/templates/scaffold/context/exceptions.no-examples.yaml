@@ -1,0 +1,5 @@
+# Optional policy exceptions input.
+# Keep entries explicit, reviewable, and time-bound.
+# Docs: https://opactx.gitbook.io/opactx/
+
+exceptions: []

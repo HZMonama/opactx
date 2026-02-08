@@ -9,6 +9,14 @@ from typing import Iterable
 from opactx.core import events as ev
 
 TEMPLATE_PACKAGE = "opactx.templates.scaffold"
+_NO_EXAMPLE_TEMPLATE_MAP: dict[Path, Path] = {
+    Path("README.md"): Path("README.no-examples.md"),
+    Path("policy") / "README.md": Path("policy") / "README.no-examples.md",
+    Path("context") / "standards.yaml": Path("context") / "standards.no-examples.yaml",
+    Path("context") / "exceptions.yaml": Path("context") / "exceptions.no-examples.yaml",
+    Path("schema") / "context.schema.yaml": Path("schema") / "context.schema.no-examples.yaml",
+    Path("schema") / "context.schema.json": Path("schema") / "context.schema.no-examples.json",
+}
 
 
 @dataclass(frozen=True)
@@ -27,7 +35,7 @@ def init_events(
     dry_run: bool,
     name: str | None,
     no_policy: bool,
-    schema: str,
+    json_schema: bool,
 ) -> Iterable[ev.OpactxEvent]:
     options = {
         "force": force,
@@ -36,7 +44,7 @@ def init_events(
         "dry_run": dry_run,
         "name": name,
         "no_policy": no_policy,
-        "schema": schema,
+        "json_schema": json_schema,
     }
     yield ev.CommandStarted(
         command="init",
@@ -47,29 +55,6 @@ def init_events(
 
     started = time.perf_counter()
     yield ev.StageStarted(command="init", stage_id="resolve_target", label="Resolve target directory")
-    schema = schema.lower()
-    if schema not in {"jsonschema", "openapi"}:
-        duration_ms = _elapsed_ms(started)
-        yield ev.StageFailed(
-            command="init",
-            stage_id="resolve_target",
-            duration_ms=duration_ms,
-            error_code="invalid_schema",
-            message=f"Unknown schema type: {schema}",
-        )
-        yield ev.CommandCompleted(command="init", ok=False, exit_code=2)
-        return
-    if schema == "openapi":
-        duration_ms = _elapsed_ms(started)
-        yield ev.StageFailed(
-            command="init",
-            stage_id="resolve_target",
-            duration_ms=duration_ms,
-            error_code="unsupported_schema",
-            message="OpenAPI scaffolding is not supported yet.",
-        )
-        yield ev.CommandCompleted(command="init", ok=False, exit_code=2)
-        return
     if project.exists() and project.is_file():
         duration_ms = _elapsed_ms(started)
         yield ev.StageFailed(
@@ -101,6 +86,7 @@ def init_events(
         with_examples=with_examples,
         no_policy=no_policy,
         project_name=project_name,
+        json_schema=json_schema,
     )
     actions = _plan_actions(project, files, force=force)
     for action, destination in actions:
@@ -159,6 +145,7 @@ def _scaffold_files(
     with_examples: bool,
     no_policy: bool,
     project_name: str,
+    json_schema: bool,
 ) -> list[ScaffoldFile]:
     files: list[ScaffoldFile] = []
 
@@ -173,43 +160,63 @@ def _scaffold_files(
         ScaffoldFile(
             template_path=Path(template_name),
             destination_path=Path("opactx.yaml"),
+            substitutions=(
+                {"schema/context.schema.yaml": "schema/context.schema.json"}
+                if json_schema
+                else None
+            ),
         )
     )
 
+    schema_filename = "context.schema.json" if json_schema else "context.schema.yaml"
+    schema_template = _template_for_mode(Path("schema") / schema_filename, with_examples=with_examples)
     files.append(
         ScaffoldFile(
-            template_path=Path("schema") / "context.schema.json",
-            destination_path=Path("schema") / "context.schema.json",
+            template_path=schema_template,
+            destination_path=Path("schema") / schema_filename,
         )
+    )
+    standards_template = _template_for_mode(
+        Path("context") / "standards.yaml",
+        with_examples=with_examples,
     )
     files.append(
         ScaffoldFile(
-            template_path=Path("context") / "standards.yaml",
+            template_path=standards_template,
             destination_path=Path("context") / "standards.yaml",
         )
     )
 
     if not minimal:
+        exceptions_template = _template_for_mode(
+            Path("context") / "exceptions.yaml",
+            with_examples=with_examples,
+        )
         files.append(
             ScaffoldFile(
-                template_path=Path("context") / "exceptions.yaml",
+                template_path=exceptions_template,
                 destination_path=Path("context") / "exceptions.yaml",
             )
         )
 
     if not minimal:
+        readme_template = _template_for_mode(Path("README.md"), with_examples=with_examples)
         files.append(
             ScaffoldFile(
-                template_path=Path("README.md"),
+                template_path=readme_template,
                 destination_path=Path("README.md"),
                 substitutions={"{{PROJECT_NAME}}": project_name},
             )
         )
 
     if not minimal and not no_policy:
+        policy_readme_template = _template_for_mode(
+            Path("policy") / "README.md",
+            with_examples=with_examples,
+        )
         files.append(
             ScaffoldFile(
-                template_path=Path("policy") / "README.md",
+                template_path=policy_readme_template,
                 destination_path=Path("policy") / "README.md",
             )
         )
@@ -262,3 +269,9 @@ def _render_template(scaffold: ScaffoldFile) -> str:
 
 def _elapsed_ms(started: float) -> float:
     return (time.perf_counter() - started) * 1000
+
+
+def _template_for_mode(template_path: Path, *, with_examples: bool) -> Path:
+    if with_examples:
+        return template_path
+    return _NO_EXAMPLE_TEMPLATE_MAP.get(template_path, template_path)

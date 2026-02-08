@@ -46,10 +46,10 @@ def init(
         "--no-policy",
         help="Do not scaffold policy/ directory.",
     ),
-    schema: str = typer.Option(
-        "jsonschema",
-        "--schema",
-        help="Contract schema type (jsonschema or openapi).",
+    json_schema: bool = typer.Option(
+        False,
+        "--json-schema",
+        help="Scaffold JSON schema authoring file (schema/context.schema.json) instead of YAML DSL.",
     ),
 ) -> None:
     events = init_events(
@@ -60,7 +60,7 @@ def init(
         dry_run=dry_run,
         name=name,
         no_policy=no_policy,
-        schema=schema,
+        json_schema=json_schema,
     )
     renderer = InitRichRenderer(console) if console.is_terminal else InitPlainRenderer(console)
     exit_code = run_events(events, renderer)

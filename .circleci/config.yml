@@ -1,0 +1,45 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.13
+    environment:
+      POETRY_NO_INTERACTION: "1"
+      POETRY_VIRTUALENVS_IN_PROJECT: "true"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - v1-poetry-{{ arch }}-{{ checksum "poetry.lock" }}
+            - v1-poetry-{{ arch }}-
+
+      - run:
+          name: Install Poetry
+          command: |
+            python -m pip install --upgrade pip
+            python -m pip install "poetry>=2.0,<3.0"
+
+      - run:
+          name: Install dependencies
+          command: |
+            poetry --version
+            poetry install --with dev --no-ansi
+
+      - save_cache:
+          key: v1-poetry-{{ arch }}-{{ checksum "poetry.lock" }}
+          paths:
+            - .venv
+            - ~/.cache/pip
+            - ~/.cache/pypoetry
+
+      - run:
+          name: Run tests
+          command: poetry run pytest -q
+
+workflows:
+  ci:
+    jobs:
+      - test

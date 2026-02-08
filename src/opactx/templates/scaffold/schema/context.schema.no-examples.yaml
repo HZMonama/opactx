@@ -1,0 +1,15 @@
+# Context schema DSL (source of truth for your contract).
+# Define the policy-facing shape of data.context here.
+# Docs: https://opactx.gitbook.io/opactx/
+
+dsl: opactx.schema/v1
+id: context
+title: Policy Context
+description: TODO describe your policy context contract
+root: context
+strict: true
+
+schema:
+  type: object
+  allow_empty_object: true
+  fields: {}

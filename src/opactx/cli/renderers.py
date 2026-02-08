@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -25,13 +25,13 @@ from opactx.core.stages import (
 RULE_WIDTH = 64
 RULE_LINE = "-" * RULE_WIDTH
 STATUS_GLYPHS = {
-    "pending": "⏸",
-    "running": "⠋",
-    "success": "✅",
-    "failed": "❌",
-    "skipped": "⏭",
-    "partial": "⚠️",
-    "warning": "⚠️",
+    "pending": "â¸",
+    "running": "â ‹",
+    "success": "âœ…",
+    "failed": "âŒ",
+    "skipped": "â­",
+    "partial": "âš ï¸",
+    "warning": "âš ï¸",
 }
 
 VALIDATE_CHECK_LABELS = {
@@ -217,7 +217,7 @@ class BuildRichRenderer(Renderer):
                 self.console.print(f"Would write: {self._output_dir}/{{data.json,.manifest}}")
             return
         if self._bundle_info:
-            self.console.print("[green]✅ Build complete[/green]")
+            self.console.print("[green]âœ… Build complete[/green]")
             next_lines = [f"- opactx inspect {self._bundle_info['out_dir']}"]
             if Path("policy").exists():
                 next_lines.append(f"- conftest test --bundle {self._bundle_info['out_dir']} ./policy")
@@ -433,11 +433,9 @@ class InitRichRenderer(Renderer):
         self._project: Path | None = None
         self._warnings: list[str] = []
         self._failed: ev.StageFailed | None = None
-        self._planned_count = 0
         self._plan_started = False
         self._dry_run = False
         self._planned: list[tuple[str, Path, str]] = []
-        self._written: list[tuple[Path, int]] = []
 
     def handle(self, event: ev.OpactxEvent) -> None:
         if isinstance(event, ev.CommandStarted):
@@ -452,7 +450,6 @@ class InitRichRenderer(Renderer):
             return
         if isinstance(event, ev.FilePlanned):
             if event.path:
-                self._planned_count += 1
                 destination = Path(event.path)
                 note = "new" if event.op == "CREATE" else "exists" if event.op == "SKIP" else ""
                 self._planned.append((event.op, destination, note))
@@ -462,8 +459,6 @@ class InitRichRenderer(Renderer):
                 self.console.print("Writing files...")
             return
         if isinstance(event, ev.FileWritten):
-            if event.path:
-                self._written.append((Path(event.path), event.bytes))
             return
         if isinstance(event, ev.FileWriteFailed):
             message = _redact(event.message)
@@ -488,40 +483,32 @@ class InitRichRenderer(Renderer):
             plan_table = Table(show_header=True, box=box.MINIMAL)
             plan_table.add_column("Action", style="bold")
             plan_table.add_column("Path")
-            plan_table.add_column("Note", style="dim")
+            plan_table.add_column("State", style="dim")
             for action, path, note in self._planned:
-                plan_table.add_row(action, str(path), note)
-            self.console.print(Panel(plan_table, title="Plan", box=box.ROUNDED, title_align="left"))
-            self.console.print(f"Planned: {self._planned_count} ops")
+                plan_table.add_row(_scaffold_action_text(action), str(path), note)
+            self.console.print("Scaffold")
+            self.console.print(RULE_LINE)
+            self.console.print(plan_table)
             return
         if isinstance(event, ev.CommandCompleted):
             if event.ok:
                 if self._dry_run:
-                    self.console.print(Panel("Dry run (no files written).", title="Dry run", box=box.ROUNDED))
+                    self.console.print("\nDry run (no files written).")
                 else:
-                    if self._written:
-                        write_table = Table(show_header=True, box=box.MINIMAL)
-                        write_table.add_column("File", style="bold")
-                        write_table.add_column("Bytes", justify="right")
-                        for path, count in self._written:
-                            write_table.add_row(str(path), str(count))
-                        self.console.print(
-                            Panel(write_table, title="Written files", box=box.ROUNDED, title_align="left")
-                        )
                     self._print_summary()
             else:
                 self._print_error()
 
     def _print_summary(self) -> None:
+        project = self._project or Path(".")
+        self.console.print("\n[green]Project initialized[/green]")
+        self.console.print(RULE_LINE)
+        self.console.print(f"- Location: {project}")
+        self.console.print("- Editable files:")
+        for line in _editable_scaffold_lines(project):
+            self.console.print(f"  - {line}")
         self.console.print("")
-        body = "\n".join(
-            [
-                "Next:",
-                "- Edit context/standards.yaml",
-                "- Run: opactx validate",
-            ]
-        )
-        self.console.print(Panel(body, title="✅ Project initialized", box=box.ROUNDED, title_align="left"))
+        self.console.print("- Next: run `opactx validate`, then `opactx build`.")
         for warning in self._warnings:
             self.console.print(f"[yellow]Warning:[/yellow] {warning}")
 
@@ -545,7 +532,6 @@ class InitPlainRenderer(Renderer):
         self._warnings: list[str] = []
         self._project: Path | None = None
         self._failed: ev.StageFailed | None = None
-        self._planned_count = 0
         self._dry_run = False
 
     def handle(self, event: ev.OpactxEvent) -> None:
@@ -560,19 +546,16 @@ class InitPlainRenderer(Renderer):
             return
         if isinstance(event, ev.FilePlanned):
             if event.path:
-                self._planned_count += 1
                 destination = Path(event.path)
                 note = "new" if event.op == "CREATE" else "exists" if event.op == "SKIP" else ""
                 suffix = f" ({note})" if note else ""
-                self.console.print(f"{event.op:<9} {destination}{suffix}")
+                self.console.print(f"{event.op.lower():<9} {destination}{suffix}")
             return
         if isinstance(event, ev.StageStarted) and event.stage_id == "apply_scaffold":
             if not self._dry_run:
                 self.console.print("Applying scaffold...")
             return
         if isinstance(event, ev.FileWritten):
-            if event.path:
-                self.console.print(f"WROTE {event.path} ({event.bytes})")
             return
         if isinstance(event, ev.FileWriteFailed):
             message = _redact(event.message)
@@ -586,16 +569,18 @@ class InitPlainRenderer(Renderer):
             label = _stage_label(event.stage_id, INIT_STAGES)
             self.console.print(f"{label} FAIL: {_redact(event.message)}")
             return
-        if isinstance(event, ev.StageCompleted) and event.stage_id == "plan_scaffold":
-            self.console.print(f"Plan complete: {self._planned_count} ops")
-            return
         if isinstance(event, ev.CommandCompleted):
             if event.ok:
                 if not self._dry_run:
-                    self.console.print("INIT OK")
-                    self.console.print("Next:")
-                    self.console.print("- Edit context/standards.yaml")
-                    self.console.print("- Run: opactx validate")
+                    project = self._project or Path(".")
+                    self.console.print("\nProject initialized")
+                    self.console.print(RULE_LINE)
+                    self.console.print(f"- Location: {project}")
+                    self.console.print("- Editable files:")
+                    for line in _editable_scaffold_lines(project):
+                        self.console.print(f"  - {line}")
+                    self.console.print("")
+                    self.console.print("- Next: run `opactx validate`, then `opactx build`.")
                     for warning in self._warnings:
                         self.console.print(f"Warning: {warning}")
             else:
@@ -634,38 +619,52 @@ class ValidateRichRenderer(Renderer):
             self._render_summary()
 
     def _render_summary(self) -> None:
-        table = Table(title="Preflight checks (no source fetching)", box=box.MINIMAL, title_justify="left")
+        self.console.print("Validation")
+        self.console.print(RULE_LINE)
+        table = Table(show_header=True, box=box.MINIMAL)
         table.add_column("Check", style="bold")
         table.add_column("Status")
         for stage_id, _label in VALIDATE_STAGES:
             label = VALIDATE_CHECK_LABELS.get(stage_id, _label)
             status = self._checks.get(stage_id, "skipped")
-            glyph = STATUS_GLYPHS.get(status, STATUS_GLYPHS["skipped"])
-            detail = status
+            detail = ""
             if stage_id == "resolve_plugins" and status == "skipped":
                 detail = "skipped (run --strict)"
-                glyph = STATUS_GLYPHS["warning"]
             if stage_id == "schema_check" and status == "partial":
                 detail = "partial (sources not fetched)"
-                glyph = STATUS_GLYPHS["warning"]
-            if status == "success":
-                detail = "OK"
-            if status == "failed":
-                detail = "FAIL"
-            if status == "skipped" and stage_id != "resolve_plugins":
+            if status == "skipped" and stage_id != "resolve_plugins" and detail == "":
                 detail = "skipped"
-            table.add_row(label, f"{glyph}  {detail}")
-        self.console.print(Panel(table, title="Preflight checks", box=box.ROUNDED, title_align="left"))
+            if status == "success":
+                detail = "ok"
+            if status == "failed":
+                detail = "fail"
+            cell = _validate_status_text(status, detail)
+            table.add_row(label, cell)
+        self.console.print(table)
         if self._warnings:
-            warnings_text = "\n".join(f"- {warning}" for warning in self._warnings)
-            self.console.print(Panel(warnings_text, title="Warnings", box=box.ROUNDED, title_align="left"))
+            warnings_text = Text("\n".join(f"- {warning}" for warning in self._warnings), style="orange1")
+            self.console.print(
+                Panel(
+                    warnings_text,
+                    title="[orange1]Warnings[/orange1]",
+                    box=box.ROUNDED,
+                    title_align="left",
+                    border_style="orange1",
+                )
+            )
         if self._errors:
             errors_text = "\n".join(f"- {error}" for error in self._errors)
             self.console.print(Panel(errors_text, title="Errors", box=box.ROUNDED, title_align="left"))
-        status_title = "✅ validate OK" if not any(
-            status == "failed" for status in self._checks.values()
-        ) else "❌ validate FAILED"
-        self.console.print(Panel("", title=status_title, box=box.ROUNDED, title_align="left"))
+        self.console.print("")
+        has_failed = any(status == "failed" for status in self._checks.values())
+        has_partial = any(status == "partial" for status in self._checks.values())
+        if has_failed:
+            overall = "failed"
+        elif has_partial or self._warnings:
+            overall = "partial"
+        else:
+            overall = "success"
+        self.console.print(Text.assemble(Text("Validation status: "), _status_badge(overall)))
 
 
 class ValidatePlainRenderer(Renderer):
@@ -1220,6 +1219,62 @@ def _status_word(status: str) -> str:
     }.get(status, status.upper())
 
 
+def _status_badge(status: str) -> Text:
+    normalized = status.strip().lower()
+    label = {
+        "success": "ok",
+        "failed": "fail",
+        "skipped": "skip",
+        "partial": "partial",
+    }.get(normalized, normalized)
+    style = {
+        "success": "bold black on green3",
+        "failed": "bold white on red3",
+        "skipped": "bold white on grey35",
+        "partial": "bold black on dark_orange3",
+    }.get(normalized, "bold white on grey35")
+    return Text(f" {label} ", style=style)
+
+
+def _validate_status_text(status: str, detail: str) -> Text:
+    normalized = status.strip().lower()
+    style = {
+        "success": "green",
+        "failed": "red",
+        "skipped": "bright_black",
+        "partial": "orange1",
+    }.get(normalized, "default")
+    if detail:
+        return Text(detail, style=style)
+    return Text(_status_word(status).lower(), style=style)
+
+
+def _scaffold_action_text(action: str) -> Text:
+    normalized = action.strip().lower()
+    style_map = {
+        "create": "green",
+        "overwrite": "yellow",
+        "skip": "dim",
+    }
+    return Text(normalized, style=style_map.get(normalized, "bold"))
+
+
+def _editable_scaffold_lines(project: Path) -> list[str]:
+    schema_path = "schema/context.schema.yaml"
+    if (project / "schema" / "context.schema.json").exists():
+        schema_path = "schema/context.schema.json"
+    lines = [
+        "opactx.yaml: pipeline config (sources, transforms, schema, output).",
+        f"{schema_path}: context contract.",
+        "context/standards.yaml: required policy standards input.",
+    ]
+    if (project / "context" / "exceptions.yaml").exists():
+        lines.append("context/exceptions.yaml: optional exception entries.")
+    if (project / "policy").exists():
+        lines.append("policy/*.rego: policy rules/modules.")
+    return lines
+
+
 def _sources_table(states: Iterable[SourceState], title: str | None = "Sources") -> Table:
     table = Table(title=title, show_header=True, box=box.MINIMAL, title_justify="left")
     table.add_column("NAME", style="bold")
@@ -1287,3 +1342,4 @@ def _stage_failure_panel(event: ev.StageFailed) -> Panel:
     if event.hint:
         body = "\n".join([body, f"hint: {_redact(event.hint)}"])
     return Panel(body, title="Build failed", box=box.ROUNDED, title_align="left")
+

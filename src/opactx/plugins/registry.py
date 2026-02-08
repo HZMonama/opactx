@@ -9,6 +9,10 @@ def load_source(kind: str):
 
 
 def load_transform(kind: str):
+    if kind == "builtin":
+        from opactx.transforms.builtin import BuiltinTransform
+
+        return BuiltinTransform
     for ep in entry_points(group="opactx.transforms"):
         if ep.name == kind:
             return ep.load()

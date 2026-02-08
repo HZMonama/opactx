@@ -3,5 +3,7 @@ package example
 default allow := false
 
 allow {
-  input.region == data.context.standards.allowed_regions[_]
+  data.context.actor.role == "admin"
+  input.action == data.context.request.action
+  input.resource.type == data.context.request.resource.type
 }

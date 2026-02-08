@@ -1,10 +1,6 @@
-# Exceptions are explicit deviations from standards.
-# Prefer time-bound exceptions with an owner and expiry.
-
-exceptions: []
-# - id: EX-0001
-#   owner: team-platform
-#   reason: "Legacy workload migration"
-#   expires: "2026-06-30"
-#   scope:
-#     registry: "registry.example.com/legacy/*"
+# Example structured exceptions consumed by policy.
+exceptions:
+  - id: EX-2026-001
+    control: deploy_window
+    owner: team-platform
+    expires_at: "2026-12-31T00:00:00Z"

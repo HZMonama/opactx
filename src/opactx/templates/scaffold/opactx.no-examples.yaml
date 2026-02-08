@@ -1,10 +1,17 @@
+# opactx pipeline configuration.
+# Edit this file to define your schema path, sources, and transforms.
+# Docs: https://opactx.gitbook.io/opactx/
+
 version: v1
 
-schema: schema/context.schema.json
+schema: schema/context.schema.yaml
 context_dir: context
 
+# Add source definitions that fetch external data into the build.
 sources: []
 
+# Add transforms in execution order.
+# `canonicalize` is the default starting point.
 transforms:
   - name: canonicalize
     type: builtin

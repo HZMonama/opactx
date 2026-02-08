@@ -1,6 +1,6 @@
 version: v1
 
-schema: schema/context.schema.json
+schema: schema/context.schema.yaml
 context_dir: context
 
 sources:
@@ -13,6 +13,14 @@ transforms:
   - name: canonicalize
     type: builtin
     with: {}
+  - name: merge
+    type: builtin
+    with:
+      target: context
+      from:
+        - path: context.standards
+        - path: context.exceptions
+        - path: sources.inventory
 
 output:
   dir: dist/bundle

@@ -6,7 +6,7 @@ import shutil
 import tarfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
@@ -15,6 +15,7 @@ from opactx.config.load import ConfigError, load_config, load_yaml_mapping
 from opactx.config.model import Config
 from opactx.core import events as ev
 from opactx.plugins.registry import load_source, load_transform
+from opactx.schema import SchemaLoadError, load_compiled_schema
 from opactx.transforms.builtin import canonicalize
 
 
@@ -150,13 +151,17 @@ def build_events(
         status="success",
     )
 
-    schema_result = _run_stage_validate_schema(project_dir, config, canonical)
+    schema_result = _run_stage_validate_schema(
+        project_dir,
+        config,
+        canonical,
+        emit_compiled_artifact=not dry_run,
+    )
     for item in schema_result.events:
         yield item
     if schema_result.failed:
         yield ev.CommandCompleted(command="build", ok=False, exit_code=2)
         return
-    schema_path = schema_result.schema_path
 
     output_path = _resolve_output_dir(project_dir, config, output_dir)
     data_bytes = _stable_json_bytes({"context": canonical})
@@ -339,6 +344,8 @@ def _run_stage_validate_schema(
     project_dir: Path,
     config: Config,
     canonical: dict[str, Any],
+    *,
+    emit_compiled_artifact: bool = False,
 ) -> _StageResultWithEvents:
     started = time.perf_counter()
     events: list[ev.OpactxEvent] = [
@@ -347,22 +354,13 @@ def _run_stage_validate_schema(
     schema_path = Path(config.schema_path)
     if not schema_path.is_absolute():
         schema_path = project_dir / schema_path
-    if not schema_path.exists():
-        duration_ms = _elapsed_ms(started)
-        events.append(ev.SchemaInvalid(command="build", path=schema_path, message="Schema not found."))
-        events.append(
-            ev.StageFailed(
-                command="build",
-                stage_id="validate_schema",
-                duration_ms=duration_ms,
-                error_code="schema_error",
-                message=f"Schema not found: {schema_path}",
-            )
-        )
-        return _StageResultWithEvents(events=events, failed=True, schema_path=schema_path)
     try:
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        schema = load_compiled_schema(
+            project_dir=project_dir,
+            schema_path=schema_path,
+            emit_compiled_artifact=emit_compiled_artifact,
+        )
+    except SchemaLoadError as exc:
         duration_ms = _elapsed_ms(started)
         events.append(ev.SchemaInvalid(command="build", path=schema_path, message=str(exc)))
         events.append(
@@ -371,7 +369,7 @@ def _run_stage_validate_schema(
                 stage_id="validate_schema",
                 duration_ms=duration_ms,
                 error_code="schema_error",
-                message=f"Invalid JSON schema: {schema_path}",
+                message=str(exc),
             )
         )
         return _StageResultWithEvents(events=events, failed=True, schema_path=schema_path)
@@ -514,20 +512,24 @@ def _normalize(
     sources: dict[str, Any],
 ) -> dict[str, Any] | str:
     transforms = list(config.transforms)
-    value: dict[str, Any]
-    if not transforms:
-        value = canonicalize(intent, sources)
-    else:
-        value = {"intent": intent, "sources": sources}
-        for transform in transforms:
-            if transform.type == "builtin" and transform.name != "canonicalize":
-                return "Only the builtin canonicalize transform is supported in v1."
-            try:
-                transform_cls = load_transform(transform.type)
+    value: dict[str, Any] = canonicalize(intent, sources)
+    for transform in transforms:
+        try:
+            transform_cls = load_transform(transform.type)
+            if transform.type == "builtin":
+                instance = transform_cls(
+                    project_dir,
+                    transform_name=transform.name,
+                    intent=intent,
+                    sources=sources,
+                    schema_path=config.schema_path,
+                    **transform.with_,
+                )
+            else:
                 instance = transform_cls(project_dir, **transform.with_)
-                value = instance.apply(value)
-            except Exception as exc:  # noqa: BLE001
-                return str(exc)
+            value = instance.apply(value)
+        except Exception as exc:  # noqa: BLE001
+            return str(exc)
         if not isinstance(value, dict):
             return "Transform output must be a mapping."
     if not _is_json_serializable(value):

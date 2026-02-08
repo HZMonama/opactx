@@ -1,0 +1,79 @@
+dsl: opactx.schema/v1
+id: context
+title: Policy Context
+description: Canonical context contract used as data.context
+root: context
+strict: true
+
+schema:
+  type: object
+  fields:
+    env:
+      type: string
+      required: true
+      enum: ["dev", "staging", "prod"]
+    actor:
+      type: object
+      required: true
+      fields:
+        id:
+          type: string
+          required: true
+        role:
+          type: string
+          required: true
+          enum: ["user", "admin", "service"]
+        email:
+          type: string
+          format: email
+    request:
+      type: object
+      required: true
+      fields:
+        action:
+          type: string
+          required: true
+        resource:
+          type: object
+          required: true
+          fields:
+            type:
+              type: string
+              required: true
+            id:
+              type: string
+              required: true
+    exceptions:
+      type: array
+      required: true
+      unique_by: id
+      items:
+        type: object
+        fields:
+          id:
+            type: string
+            required: true
+          control:
+            type: string
+            required: true
+          owner:
+            type: string
+            required: true
+          expires_at:
+            type: string
+            format: date-time
+    resources:
+      type: array
+      required: true
+      items:
+        type: object
+        fields:
+          id:
+            type: string
+            required: true
+          type:
+            type: string
+            required: true
+          region:
+            type: string
+            required: true

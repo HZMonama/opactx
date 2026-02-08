@@ -40,4 +40,11 @@ http = "opactx.sources.http:HttpSource"
 exec = "opactx.sources.exec:ExecSource"
 
 [tool.poetry.plugins."opactx.transforms"]
-builtin = "opactx.transforms.builtin:CanonicalizeTransform"
+builtin = "opactx.transforms.builtin:BuiltinTransform"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-config --strict-markers"
+markers = [
+    "integration: tests that exercise multi-stage command behavior",
+]

@@ -1,11 +1,74 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Policy Context",
+  "description": "Canonical context contract used as data.context",
   "type": "object",
-  "required": ["standards", "exceptions", "sources"],
+  "required": ["env", "actor", "request", "exceptions", "resources"],
   "properties": {
-    "standards": { "type": "object" },
-    "exceptions": { "type": "object" },
-    "sources": { "type": "object" }
+    "env": {
+      "type": "string",
+      "enum": ["dev", "staging", "prod"]
+    },
+    "actor": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin", "service"]
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        }
+      },
+      "required": ["id", "role"],
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "resource": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" },
+            "id": { "type": "string" }
+          },
+          "required": ["type", "id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["action", "resource"],
+      "additionalProperties": false
+    },
+    "exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "control": { "type": "string" },
+          "owner": { "type": "string" },
+          "expires_at": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "control", "owner"],
+        "additionalProperties": false
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "region": { "type": "string" }
+        },
+        "required": ["id", "type", "region"],
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

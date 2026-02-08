@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Starter context schema. Docs: https://opactx.gitbook.io/opactx/",
+  "title": "Policy Context",
+  "description": "TODO describe your policy context contract",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}
